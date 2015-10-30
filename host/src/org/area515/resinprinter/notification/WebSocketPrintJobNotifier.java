@@ -25,7 +25,7 @@ import org.area515.resinprinter.slice.StlError;
 import org.area515.util.JacksonEncoder;
 import org.area515.util.PrintJobJacksonDecoder;
 
-@ServerEndpoint(value="/printjobnotification/{printJobName}", encoders={JacksonEncoder.class}, decoders={PrintJobJacksonDecoder.class})
+@ServerEndpoint(value="/printJobNotification/{printJobName}", encoders={JacksonEncoder.class}, decoders={PrintJobJacksonDecoder.class})
 public class WebSocketPrintJobNotifier implements Notifier {
 	private static ConcurrentHashMap<String, ConcurrentHashMap<String, Session>> sessionsByPrintJobName = new ConcurrentHashMap<String, ConcurrentHashMap<String, Session>>();
 	
@@ -41,18 +41,18 @@ public class WebSocketPrintJobNotifier implements Notifier {
 	}
 	
 	@OnOpen
-	public void onOpen(Session session, @PathParam("printJobName") String printerName) {
+	public void onOpen(Session session, @PathParam("printJobName") String printJobName) {
 		ConcurrentHashMap<String, Session> sessionsBySessionId = new ConcurrentHashMap<String, Session>();
 		sessionsBySessionId.put(session.getId(), session);
-		ConcurrentHashMap<String, Session> otherSessionsBySessionId = sessionsByPrintJobName.putIfAbsent(printerName, sessionsBySessionId);
+		ConcurrentHashMap<String, Session> otherSessionsBySessionId = sessionsByPrintJobName.putIfAbsent(printJobName, sessionsBySessionId);
 		if (otherSessionsBySessionId != null) {
 			otherSessionsBySessionId.put(session.getId(), session);
 		}
 	}
 	
 	@OnClose
-	public void onClose(Session session, @PathParam("printJobName") String printerName) {
-		ConcurrentHashMap<String, Session> otherSessionsBySessionId = sessionsByPrintJobName.get(printerName);
+	public void onClose(Session session, @PathParam("printJobName") String printJobName) {
+		ConcurrentHashMap<String, Session> otherSessionsBySessionId = sessionsByPrintJobName.get(printJobName);
 		if (otherSessionsBySessionId != null) {
 			otherSessionsBySessionId.remove(session.getId());
 		}
@@ -76,7 +76,7 @@ public class WebSocketPrintJobNotifier implements Notifier {
 		
 		for (Session currentSession : sessionsBySessionId.values()) {
 			try {
-				currentSession.getAsyncRemote().sendObject(job);
+				currentSession.getAsyncRemote().sendObject(new PrintJobEvent(job, NotificationEvent.PrintJobChanged));
 			} catch (Exception e) {
 				e.printStackTrace();
 			}
@@ -111,13 +111,13 @@ public class WebSocketPrintJobNotifier implements Notifier {
 			try {
 				PrintJob job = new PrintJob(fileUploaded);
 				job.setFutureJobStatus(new StaticJobStatusFuture(JobStatus.Ready));
-				currentSession.getAsyncRemote().sendObject(job);
+				currentSession.getAsyncRemote().sendObject(new PrintJobEvent(job, NotificationEvent.FileUploadComplete));
 			} catch (Exception e) {
 				e.printStackTrace();
 			}
 		}
 	}
-
+	
 	@Override
 	public void geometryError(PrintJob job, List<StlError> errors) {
 		ConcurrentHashMap<String, Session> sessionsBySessionId = sessionsByPrintJobName.get(job.getJobFile().getName());
@@ -127,10 +127,26 @@ public class WebSocketPrintJobNotifier implements Notifier {
 		
 		for (Session currentSession : sessionsBySessionId.values()) {
 			try {
-				currentSession.getAsyncRemote().sendObject(errors);
+				currentSession.getAsyncRemote().sendObject(new PrintJobEvent(job, NotificationEvent.GeometryError, errors));
 			} catch (Exception e) {
 				e.printStackTrace();
 			}
-		}	
+		}
+	}
+
+	@Override
+	public void printerOutOfMatter(Printer printer, PrintJob job) {
+		ConcurrentHashMap<String, Session> sessionsBySessionId = sessionsByPrintJobName.get(job.getJobFile().getName());
+		if (sessionsBySessionId == null) {
+			return;
+		}
+		
+		for (Session currentSession : sessionsBySessionId.values()) {
+			try {
+				currentSession.getAsyncRemote().sendObject(new PrintJobEvent(job, NotificationEvent.OutOfInk));
+			} catch (Exception e) {
+				e.printStackTrace();
+			}
+		}
 	}
 }

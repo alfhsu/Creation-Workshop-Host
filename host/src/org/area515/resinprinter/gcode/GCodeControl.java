@@ -10,14 +10,20 @@ import org.area515.resinprinter.job.PrintJob;
 import org.area515.resinprinter.printer.MachineConfig;
 import org.area515.resinprinter.printer.Printer;
 import org.area515.resinprinter.serial.SerialCommunicationsPort;
+import org.area515.resinprinter.serial.SerialManager;
+import org.area515.util.IOUtilities;
+import org.area515.util.IOUtilities.ParseState;
 import org.area515.util.TemplateEngine;
 
 import freemarker.template.TemplateException;
 
 public abstract class GCodeControl {
+	public int SUGGESTED_TIMEOUT_FOR_ONE_GCODE = 1000 * 60 * 2;//2 minutes
+	
     private Printer printer;
-    private SerialCommunicationsPort port;
     private ReentrantLock gCodeLock = new ReentrantLock();
+    private StringBuilder builder = new StringBuilder();
+    private int parseLocation = 0;
     
     public GCodeControl(Printer printer) {
     	this.printer = printer;
@@ -26,29 +32,26 @@ public abstract class GCodeControl {
     }
 	
     private SerialCommunicationsPort getSerialPort() {
-    	if (port == null) {
-    		port = printer.getSerialPort();
-    	}
-    	
-    	return port;
+    	return printer.getPrinterFirmwareSerialPort();
     }
-    public String sendGcode(String cmd) {
-		gCodeLock.lock();
-        try {
-        	if (!cmd.endsWith("\n")) {
-        		cmd += "\n";
-        	}
-        	
-        	getSerialPort().write(cmd);
-        	return getSerialPort().readUntilOkOrStoppedPrinting(null);
-        } catch (IOException ex) {
-        	ex.printStackTrace();
-        	return "IO Problem!";
-        } finally {
-        	gCodeLock.unlock();
-        }
-    }
-    
+	
+	private String readUntilOkOrStoppedPrinting(Printer printer) throws IOException {
+		StringBuilder responseBuilder = new StringBuilder();
+		ParseState state = null;
+		do {
+			state = IOUtilities.readLine(printer, getSerialPort(), builder, parseLocation, SUGGESTED_TIMEOUT_FOR_ONE_GCODE, IOUtilities.CPU_LIMITING_DELAY);
+			parseLocation = state.parseLocation;
+			
+			if (state.currentLine != null) {
+				responseBuilder.append(state.currentLine);
+			}
+			
+			System.out.println("lineRead:" + state.currentLine);
+		} while (state.currentLine != null && !state.currentLine.matches("(?is:ok.*)"));
+		
+		return responseBuilder.toString();
+	}
+
     public String sendGcodeReturnIfPrinterStops(String cmd) throws IOException {
 		gCodeLock.lock();
         try {
@@ -56,8 +59,25 @@ public abstract class GCodeControl {
         		cmd += "\n";
         	}
         	
-        	getSerialPort().write(cmd);
-        	return getSerialPort().readUntilOkOrStoppedPrinting(printer);
+        	getSerialPort().write(cmd.getBytes());
+        	return readUntilOkOrStoppedPrinting(printer);
+        } finally {
+        	gCodeLock.unlock();
+        }
+    }
+    
+    public String sendGcode(String cmd) {
+		gCodeLock.lock();
+        try {
+        	if (!cmd.endsWith("\n")) {
+        		cmd += "\n";
+        	}
+        	
+        	getSerialPort().write(cmd.getBytes());
+        	return readUntilOkOrStoppedPrinting(null);
+        } catch (IOException ex) {
+        	ex.printStackTrace();
+        	return "IO Problem!";
         } finally {
         	gCodeLock.unlock();
         }
@@ -71,7 +91,14 @@ public abstract class GCodeControl {
      * @throws IOException
      */
     public String readWelcomeChitChat() throws IOException {
-    	return executeSetAbsolutePositioning();
+		try {
+			StringBuilder builder = new StringBuilder();
+			builder.append(IOUtilities.readWithTimeout(getSerialPort(), SerialManager.TIME_OUT, SerialManager.CPU_LIMITING_DELAY));
+			builder.append(executeSetAbsolutePositioning());
+			return builder.toString();
+		} catch (InterruptedException e) {
+			return null;
+		}
     }
     public String executeSetAbsolutePositioning() {
     	return sendGcode("G91\r\n");

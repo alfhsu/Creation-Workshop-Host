@@ -2,6 +2,7 @@ package org.area515.resinprinter.printer;
 
 import javax.xml.bind.annotation.XmlElement;
 import javax.xml.bind.annotation.XmlRootElement;
+import javax.xml.bind.annotation.XmlTransient;
 
 @XmlRootElement(name="PrinterConfiguration")
 public class PrinterConfiguration {
@@ -10,15 +11,19 @@ public class PrinterConfiguration {
 	private String machineConfigName;
 	@XmlElement(name="SlicingProfileName")
 	private String slicingProfileName;
+	@XmlElement(name="AutoStart")
+	private boolean autoStart;
+	
 	private MachineConfig machineConfig;
 	private SlicingProfile slicingProfile;
 
 	public PrinterConfiguration() {
 	}
 	
-	public PrinterConfiguration(String machineConfigName, String slicingProfileName) {
+	public PrinterConfiguration(String machineConfigName, String slicingProfileName, boolean autoStart) {
 		 this.machineConfigName = machineConfigName;
 		 this.slicingProfileName = slicingProfileName;
+		 this.autoStart = autoStart;
 	}
 	
 	public String getMachineConfigName() {
@@ -50,6 +55,14 @@ public class PrinterConfiguration {
 		this.slicingProfile = slicingProfile;
 	}
 	
+	@XmlTransient
+	public boolean isAutoStart() {
+		return autoStart;
+	}
+	public void setAutoStart(boolean autoStart) {
+		this.autoStart = autoStart;
+	}
+
 	@Override
 	public int hashCode() {
 		final int prime = 31;

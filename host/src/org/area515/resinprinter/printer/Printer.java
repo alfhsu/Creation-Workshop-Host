@@ -6,7 +6,6 @@ import java.awt.Dimension;
 import java.awt.Frame;
 import java.awt.Graphics;
 import java.awt.Graphics2D;
-import java.awt.GraphicsConfiguration;
 import java.awt.GraphicsDevice;
 import java.awt.Point;
 import java.awt.Rectangle;
@@ -17,12 +16,17 @@ import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.ReentrantLock;
 
 import javax.swing.JFrame;
+import javax.xml.bind.annotation.XmlTransient;
 
 import org.area515.resinprinter.display.DisplayManager;
 import org.area515.resinprinter.display.InappropriateDeviceException;
 import org.area515.resinprinter.gcode.GCodeControl;
 import org.area515.resinprinter.job.JobStatus;
+import org.area515.resinprinter.projector.ProjectorModel;
 import org.area515.resinprinter.serial.SerialCommunicationsPort;
+
+import com.fasterxml.jackson.annotation.JsonIgnore;
+import com.fasterxml.jackson.annotation.JsonProperty;
 
 public class Printer {
 	private PrinterConfiguration configuration;
@@ -31,14 +35,13 @@ public class Printer {
 	private Frame refreshFrame;
 	private DisplayState displayState = DisplayState.Blank;
 	private int calibrationSquareSize;
-	private BufferedImage blankImage;
-	private BufferedImage calibrationImage;
 	private BufferedImage displayImage;
-	//private Rectangle screenSize;
+	private boolean started;
 	private String displayDeviceID;
 	
-	//For Serial Port
-	private SerialCommunicationsPort serialPort;
+	//For Serial Ports
+	private SerialCommunicationsPort printerFirmwareSerialPort;
+	private SerialCommunicationsPort projectorSerialPort;
 	
 	//For Job Status
 	private volatile JobStatus status;
@@ -48,11 +51,17 @@ public class Printer {
 	//GCode
 	private GCodeControl gCodeControl;
 
+	//Projector model
+	private ProjectorModel projectorModel;
+	
 	public static enum DisplayState {
 		Calibration,
 		Blank,
 		CurrentSlice
 	}
+	
+	//For jaxb/json
+	private Printer() {}
 	
 	public Printer(PrinterConfiguration configuration) throws InappropriateDeviceException {
 		this.configuration = configuration;
@@ -69,12 +78,27 @@ public class Printer {
 		}
 	}
 	
+	@JsonIgnore
 	public String getName() {
 		return configuration.getName();
 	}
 	
+	@XmlTransient
+	@JsonProperty
 	public boolean isPrintInProgress() {
-		return status == JobStatus.Paused || status == JobStatus.Printing;
+		return status == JobStatus.Paused || status == JobStatus.Printing || this.status == JobStatus.PausedOutOfPrintMaterial;
+	}
+	public void setPrintInProgress(boolean progress) {
+		//Ignore anyone trying to set this property, this is for json only!!
+	}
+	
+	@XmlTransient
+	@JsonProperty
+	public boolean isStarted() {
+		return started;
+	}
+	public void setStarted(boolean started) {
+		this.started = started;
 	}
 	
 	public JobStatus getStatus() {
@@ -84,7 +108,7 @@ public class Printer {
 	public void setStatus(JobStatus status) {
 		statusLock.lock();
 		try {
-			if (this.status == JobStatus.Paused) {
+			if (this.status == JobStatus.Paused || this.status == JobStatus.PausedOutOfPrintMaterial) {
 				jobContinued.signalAll();
 			}
 			
@@ -98,7 +122,7 @@ public class Printer {
 		statusLock.lock();
 		try {
 			//Very important that this check is performed
-			if (this.status != JobStatus.Paused) {
+			if (this.status != JobStatus.Paused && this.status != JobStatus.PausedOutOfPrintMaterial) {
 				return isPrintInProgress();
 			}
 			System.out.println("Print has been paused.");
@@ -116,7 +140,7 @@ public class Printer {
 	public JobStatus togglePause() {
 		statusLock.lock();
 		try {
-			if (this.status == JobStatus.Paused) {
+			if (this.status == JobStatus.Paused || this.status == JobStatus.PausedOutOfPrintMaterial) {
 				setStatus(JobStatus.Printing);
 				return this.status;
 			}
@@ -130,18 +154,6 @@ public class Printer {
 			statusLock.unlock();
 		}
 	}
-	
-	public void setSerialPort(SerialCommunicationsPort serialPort) {
-		this.serialPort = serialPort;
-		
-		//Read the welcome mat
-		try {
-			System.out.println("Firmware Welcome chitchat:" + getGCodeControl().readWelcomeChitChat());
-		} catch (IOException e) {
-			e.printStackTrace();
-		}
-	}
-	
 	
 	public void setGraphicsData(GraphicsDevice device) {
 		refreshFrame = new JFrame() {
@@ -225,6 +237,21 @@ public class Printer {
 		refreshFrame.repaint();
 	}
 
+	public void setProjectorModel(ProjectorModel projectorModel) {
+		this.projectorModel = projectorModel;
+	}
+	public void setProjectorPowerStatus(boolean powerOn) throws IOException {
+		if (projectorModel == null) {
+			throw new IOException("Projector model couldn't be detected");
+		}
+		
+		if (projectorSerialPort == null) {
+			throw new IOException("Serial port not available for projector.");
+		}
+		
+		projectorModel.setProjectorState(powerOn, projectorSerialPort);
+	}
+	
 	public PrinterConfiguration getConfiguration() {
 		return configuration;
 	}
@@ -232,26 +259,48 @@ public class Printer {
 		this.configuration = configuration;
 	}
 
+	@JsonIgnore
 	public GCodeControl getGCodeControl() {
 		return gCodeControl;
 	}
-
-	public SerialCommunicationsPort getSerialPort() {
-		return serialPort;
+	
+	public void setPrinterFirmwareSerialPort(SerialCommunicationsPort printerFirmwareSerialPort) {
+		this.printerFirmwareSerialPort = printerFirmwareSerialPort;
+		
+		//Read the welcome mat if it's not null
+		if (printerFirmwareSerialPort != null) {
+			try {
+				System.out.println("Firmware Welcome chitchat:" + getGCodeControl().readWelcomeChitChat());
+			} catch (IOException e) {
+				e.printStackTrace();
+			}
+		}
+	}
+	@JsonIgnore
+	public SerialCommunicationsPort getPrinterFirmwareSerialPort() {
+		return printerFirmwareSerialPort;
 	}
 	
+	public void setProjectorSerialPort(SerialCommunicationsPort projectorSerialPort) {
+		this.projectorSerialPort = projectorSerialPort;
+	}
+	@JsonIgnore
+	public SerialCommunicationsPort getProjectorSerialPort() {
+		return projectorSerialPort;
+	}
+
 	public String toString() {
-		return getName() + "(SerialPort:" + serialPort + ", Display:" + displayDeviceID + ")";
+		return getName() + "(SerialPort:" + printerFirmwareSerialPort + ", Display:" + displayDeviceID + ")";
 	}
 	
 	public void close() {
-		//jobFile.deleteOnExit();
-		if (serialPort != null) {
-			serialPort.close();
+		if (printerFirmwareSerialPort != null) {
+			printerFirmwareSerialPort.close();
 		}
 		if (refreshFrame != null) {
 			refreshFrame.dispose();
 		}
+		started = false;
 	}
 
 	@Override

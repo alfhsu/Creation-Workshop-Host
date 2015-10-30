@@ -2,6 +2,7 @@ package org.area515.resinprinter.job;
 
 import java.io.File;
 import java.util.UUID;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Future;
 
@@ -15,18 +16,23 @@ public class PrintJob {
 	private volatile long currentSliceTime = 0;
 	private volatile long averageSliceTime = 0;
 	private volatile long startTime = 0;
-	private volatile int exposureTime = 0;
-	private volatile double zLiftSpeed = 0;
-	private volatile double zLiftDistance = 0;
 	private volatile double totalCost = 0;
 	private volatile double currentSliceCost = 0;
-	private volatile boolean exposureTimeOverriden = false;
-	private volatile PrintFileProcessor printFileProcessor;
+	private volatile PrintFileProcessor<?> printFileProcessor;
 	
+	//Overridables
+	private volatile boolean overrideExposureTime;
+	private volatile int exposureTime = 0;
+	private volatile boolean overrideZLiftSpeed;
+	private volatile double zLiftSpeed;
+	private volatile boolean overrideZLiftDistance;
+	private volatile double zLiftDistance;
+
 	private UUID id = UUID.randomUUID();
 	private File jobFile;
 	private Printer printer;
 	private Future<JobStatus> futureJobStatus;
+	private CountDownLatch futureJobStatusAssigned = new CountDownLatch(1);
 	
 	public PrintJob(File jobFile) {
 		this.jobFile = jobFile;
@@ -75,41 +81,24 @@ public class PrintJob {
 		return printer;
 	}
 	
-	public int getExposureTime() {
-		return exposureTime;
-	}
-	public void setExposureTime(int exposureTime) {
-		this.exposureTime = exposureTime;
-	}
 	
-	public double getZLiftSpeed() {
-		return zLiftSpeed;
-	}
-	public void setZLiftSpeed(double zLiftSpeed) {
-		this.zLiftSpeed = zLiftSpeed;
-	}
-	
-	public double getZLiftDistance() {
-		return zLiftDistance;
-	}
-	public void setZLiftDistance(double zLiftDistance) {
-		this.zLiftDistance = zLiftDistance;
-	}
 	
 	public JobStatus getJobStatus() {
-		Printer localPrinter = printer;
-		
-		if (localPrinter != null) {
-			return localPrinter.getStatus();
-		}
-		
+		//If the futureJobStatus is done, we will certainly have the last status that will never be changed.
 		if (futureJobStatus != null && (futureJobStatus.isDone() || futureJobStatus.isCancelled())) {
 			try {
 				return futureJobStatus.get();
 			} catch (InterruptedException | ExecutionException e) {
 			}
 		}
+
+		Printer localPrinter = printer;
 		
+		if (localPrinter != null) {
+			return localPrinter.getStatus();
+		}
+		
+		//TODO: Why are we doing this?
 		return JobStatus.Failed;
 	}
 	public void setJobStatus() {
@@ -118,19 +107,33 @@ public class PrintJob {
 	
 	public void setFutureJobStatus(Future<JobStatus> futureJobStatus) {
 		this.futureJobStatus = futureJobStatus;
+		futureJobStatusAssigned.countDown();
 	}
 	
 	public String getErrorDescription() {
+		try {
+			futureJobStatusAssigned.await();
+		} catch (InterruptedException e1) {
+
+		}
+		
 		if (futureJobStatus.isDone() || futureJobStatus.isCancelled()) {
+			String errorDescription = null;
 			try {
 				return "Job Status:" + futureJobStatus.get();
-			} catch (InterruptedException | ExecutionException e) {
-				if (e.getCause() instanceof InappropriateDeviceException) {
-					return e.getCause().getMessage();
+			} catch (Throwable e) {
+				while (e.getCause() != null) {
+					e = e.getCause();
 				}
 				
-				return "Job Failed. Check server logs for exact problem";
+				errorDescription = e.getMessage();
 			}
+			
+			if (!"".equals(errorDescription)) {
+				return errorDescription;
+			}
+			
+			return "Job Failed. Check server logs for exact problem";
 		}
 		
 		return null;
@@ -139,46 +142,85 @@ public class PrintJob {
 		//do nothing.  This is just for JSON
 	}
 
-	public PrintFileProcessor getPrintFileProcessor() {
+	public PrintFileProcessor<?> getPrintFileProcessor() {
 		return printFileProcessor;
 	}
-	public void setPrintFileProcessor(PrintFileProcessor printFileProcessor) {
+	public void setPrintFileProcessor(PrintFileProcessor<?> printFileProcessor) {
 		this.printFileProcessor = printFileProcessor;
 	}
+	
 
+	public void stopOverridingZLiftDistance() {
+		overrideZLiftDistance = false;
+	}
 	public void overrideZLiftDistance(double zLiftDistance) throws InappropriateDeviceException {
 		if (printer == null) {
 			throw new InappropriateDeviceException("This print job:" + jobFile.getName() + " doesn't have a printer assigned.");
 		}
 		
 		try {
-			printer.getGCodeControl().executeGCodeWithTemplating(this, printer.getConfiguration().getSlicingProfile().getZLiftDistanceGCode());
+			overrideZLiftDistance = true;
 			this.zLiftDistance = zLiftDistance;
+			printer.getGCodeControl().executeGCodeWithTemplating(this, printer.getConfiguration().getSlicingProfile().getZLiftDistanceGCode());
 		} catch (InappropriateDeviceException e) {
 			throw e;
 		}
 	}
+	public boolean isZLiftDistanceOverriden() {
+		return overrideZLiftDistance;
+	}
+	public double getZLiftDistance() {
+		return zLiftDistance;
+	}
+	public void setZLiftDistance(double zLiftDistance) {
+		this.zLiftDistance = zLiftDistance;
+	}
+
 	
+	public void stopOverridingZLiftSpeed() {
+		overrideZLiftSpeed = false;
+	}
 	public void overrideZLiftSpeed(double zLiftSpeed) throws InappropriateDeviceException {
 		if (printer == null) {
 			throw new InappropriateDeviceException("This print job:" + jobFile.getName() + " doesn't have a printer assigned.");
 		}
 		
 		try {
-			printer.getGCodeControl().executeGCodeWithTemplating(this, printer.getConfiguration().getSlicingProfile().getZLiftDistanceGCode());
+			this.overrideZLiftSpeed = true;
 			this.zLiftSpeed = zLiftSpeed;
+			printer.getGCodeControl().executeGCodeWithTemplating(this, printer.getConfiguration().getSlicingProfile().getZLiftSpeedGCode());
 		} catch (InappropriateDeviceException e) {
 			throw e;
 		}
 	}
+	public boolean isZLiftSpeedOverriden() {
+		return overrideZLiftSpeed;
+	}
+	public double getZLiftSpeed() {
+		return zLiftSpeed;
+	}
+	public void setZLiftSpeed(double zLiftSpeed) {
+		this.zLiftSpeed = zLiftSpeed;
+	}
+
 	
+	public void stopOverridingExposureTime() {
+		this.overrideExposureTime = false;
+	}
 	public void overrideExposureTime(int exposureTime) {
 		this.exposureTime = exposureTime;
-		exposureTimeOverriden = true;
+		this.overrideExposureTime = true;
 	}
 	public boolean isExposureTimeOverriden() {
-		return exposureTimeOverriden;
+		return overrideExposureTime;
 	}
+	public int getExposureTime() {
+		return exposureTime;
+	}
+	public void setExposureTime(int exposureTime) {
+		this.exposureTime = exposureTime;
+	}
+
 	
 	public long getAverageSliceTime() {
 		return averageSliceTime;
@@ -206,8 +248,11 @@ public class PrintJob {
 		averageSliceTime = ((averageSliceTime * currentSlice) + sliceTime) / (currentSlice + 1);
 		currentSliceTime = sliceTime;
 		currentSlice++;
-		double buildVolume = buildAreaInMM * inkConfig.getSliceHeight();
-		currentSliceCost = (buildVolume / 1000000) * inkConfig.getResinPriceL();
+		if (buildAreaInMM > 0) {
+			double buildVolume = buildAreaInMM * inkConfig.getSliceHeight();
+			currentSliceCost = (buildVolume / 1000000) * inkConfig.getResinPriceL();
+		}
+		
 		totalCost += currentSliceCost;
 	}
 	

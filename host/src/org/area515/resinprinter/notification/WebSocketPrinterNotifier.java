@@ -6,11 +6,11 @@ import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
 
 import javax.websocket.CloseReason;
+import javax.websocket.CloseReason.CloseCodes;
 import javax.websocket.DeploymentException;
 import javax.websocket.OnClose;
 import javax.websocket.OnOpen;
 import javax.websocket.Session;
-import javax.websocket.CloseReason.CloseCodes;
 import javax.websocket.server.PathParam;
 import javax.websocket.server.ServerContainer;
 import javax.websocket.server.ServerEndpoint;
@@ -20,7 +20,7 @@ import org.area515.resinprinter.job.PrintJob;
 import org.area515.resinprinter.printer.Printer;
 import org.area515.resinprinter.slice.StlError;
 
-@ServerEndpoint("/printernotification/{printerName}")
+@ServerEndpoint("/printerNotification/{printerName}")
 public class WebSocketPrinterNotifier implements Notifier {
 	private static ConcurrentHashMap<String, ConcurrentHashMap<String, Session>> sessionsByPrinterName = new ConcurrentHashMap<String, ConcurrentHashMap<String, Session>>();
 	
@@ -66,7 +66,7 @@ public class WebSocketPrinterNotifier implements Notifier {
 		
 		for (Session currentSession : sessionsBySessionId.values()) {
 			try {
-				currentSession.getAsyncRemote().sendObject(printer);
+				currentSession.getAsyncRemote().sendObject(new PrinterEvent(printer, NotificationEvent.PrinterChanged));
 			} catch (Exception e) {
 				e.printStackTrace();
 			}
@@ -94,5 +94,21 @@ public class WebSocketPrinterNotifier implements Notifier {
 	@Override
 	public void geometryError(PrintJob job, List<StlError> error) {
 		//Not for printers
+	}
+
+	@Override
+	public void printerOutOfMatter(Printer printer, PrintJob job) {
+		ConcurrentHashMap<String, Session> sessionsBySessionId = sessionsByPrinterName.get(printer.getName());
+		if (sessionsBySessionId == null) {
+			return;
+		}
+		
+		for (Session currentSession : sessionsBySessionId.values()) {
+			try {
+				currentSession.getAsyncRemote().sendObject(new PrinterEvent(printer, NotificationEvent.PrinterChanged));
+			} catch (Exception e) {
+				e.printStackTrace();
+			}
+		}
 	}
 }

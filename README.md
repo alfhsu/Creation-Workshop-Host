@@ -3,7 +3,8 @@ Creation-Workshop-Host
 
 What does CWH look like?
 -------------------------------------------------------------------------------  
-It looks like [this](https://github.com/area515/Creation-Workshop-Host/blob/master/host/cwh.png).
+Old Version Looks like [this](https://github.com/area515/Creation-Workshop-Host/blob/master/host/cwh.png).  
+The New Version Looks like [this](https://github.com/area515/Creation-Workshop-Host/blob/master/host/cwhNew.png).
 
 Where are the instructions for installing on the Raspberry Pi?  
 -------------------------------------------------------------------------------  
@@ -12,6 +13,26 @@ Where are the instructions for installing on the Raspberry Pi?
 Where is a video of how to use CWH with CWS and Zip files?  
 -------------------------------------------------------------------------------  
 [Here](https://www.youtube.com/watch?v=J3HTCkxlKcw).
+
+Where is a video of how to setup CWH from scratch on the Raspberry Pi?
+-------------------------------------------------------------------------------  
+[Here](https://www.youtube.com/watch?v=ng1Sj2ktWhU).
+
+How do I use this new version of the GUI you've started?  
+-------------------------------------------------------------------------------  
+Change the following line:  
+```
+hostGUI=resources
+```  
+in this file:  
+```
+[LocationWhereCWHIsInstalled]/config.properties
+```  
+to this:  
+```
+hostGUI=resourcesnew
+```  
+Once the new GUI has all of the functionality of the current version, we'll use this version automatically.
 
 What features does CWH have?
 -------------------------------------------------------------------------------  

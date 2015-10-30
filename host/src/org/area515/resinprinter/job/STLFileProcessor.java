@@ -1,113 +1,96 @@
 package org.area515.resinprinter.job;
 
 import java.awt.Graphics2D;
-import java.awt.Paint;
 import java.awt.image.BufferedImage;
 import java.io.File;
-import java.io.FileNotFoundException;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.Callable;
-import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Future;
-import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.ScheduledThreadPoolExecutor;
-import java.util.concurrent.ThreadFactory;
-import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
 
 import javax.script.ScriptEngine;
-import javax.script.ScriptEngineManager;
-import javax.script.ScriptException;
 
-import org.area515.resinprinter.display.InappropriateDeviceException;
-import org.area515.resinprinter.notification.NotificationManager;
+import org.area515.resinprinter.job.PrintFileProcessingAid.DataAid;
+import org.area515.resinprinter.job.STLFileProcessor.STLFileData.ImageData;
 import org.area515.resinprinter.printer.BuildDirection;
-import org.area515.resinprinter.printer.Printer;
-import org.area515.resinprinter.printer.PrinterConfiguration;
 import org.area515.resinprinter.printer.SlicingProfile;
-import org.area515.resinprinter.printer.SlicingProfile.InkConfig;
+import org.area515.resinprinter.server.Main;
 import org.area515.resinprinter.slice.ZSlicer;
 import org.area515.resinprinter.stl.Triangle3d;
-import org.area515.util.TemplateEngine;
 
 public class STLFileProcessor implements PrintFileProcessor<Set<Triangle3d>> {
 	private Map<PrintJob, STLFileData> dataByPrintJob = new HashMap<PrintJob, STLFileData>();
-	private AtomicInteger threads = new AtomicInteger();
-	public class STLFileData {
-		public ScriptEngine scriptEngine = new ScriptEngineManager().getEngineByExtension("js");
-		public BufferedImage trueImage;
-		public BufferedImage falseImage;
-		public AtomicBoolean currentImagePointer;
-		public Lock renderingImage = new ReentrantLock();
-		public ZSlicer slicer;
-	}
 
-	private ScheduledExecutorService EXECUTOR = new ScheduledThreadPoolExecutor(3, new ThreadFactory() {
-		@Override
-		public Thread newThread(Runnable r) {
-			Thread thread = new Thread(r, "STLFileProcessorThread-" + threads.incrementAndGet());
-			thread.setDaemon(true);
-			return thread;
+	public static class STLFileData {
+		public static class ImageData {
+			public BufferedImage image;
+			private double area;
+			private ReentrantLock lock = new ReentrantLock();
+			
+			public ImageData(BufferedImage image, double area) {
+				this.image = image;
+				this.area = area;
+			}
 		}
-	});
+		
+		public ScriptEngine scriptEngine;
+		public Map<Boolean, ImageData> imageSync = new HashMap<>();
+		public boolean currentImagePointer;
+		public ZSlicer slicer;
+		public PrintFileProcessingAid aid;
+		
+		public STLFileData(PrintFileProcessingAid aid, ScriptEngine scriptEngine) {
+			this.scriptEngine = scriptEngine;
+			this.aid = aid;
+		}
+		
+		public ReentrantLock getSpecificLock(boolean lockPointer) {
+			return imageSync.get(lockPointer).lock;
+		}
+		
+		public ReentrantLock getCurrentLock() {
+			return imageSync.get(currentImagePointer).lock;
+		}
+		
+		public BufferedImage getCurrentImage() {
+			return imageSync.get(currentImagePointer).image;
+		}
+		
+		public double getCurrentArea() {
+			return imageSync.get(currentImagePointer).area;
+		}
+	}
 	
 	public class CurrentImageRenderer implements Callable<BufferedImage> {
-		private BufferedImage currentImage = null;
 		private STLFileData data;
-		private PrintJob printJob;
+		private boolean imageToBuild;
 		
-		public CurrentImageRenderer(PrintJob printJob, STLFileData data, int width, int height) {
+		public CurrentImageRenderer(STLFileData data, boolean imageToBuild, int width, int height) {
 			this.data = data;
-			this.printJob = printJob;
 			
-			if (data.currentImagePointer.get()) {
-				if (data.falseImage == null) {
-					data.falseImage = new BufferedImage(width, height, BufferedImage.TYPE_INT_ARGB_PRE);
-				}
-				data.renderingImage.lock();
-				try {
-					data.currentImagePointer.set(false);
-					currentImage = data.falseImage;
-				} finally {
-					data.renderingImage.unlock();
-				}
-			} else {
-				if (data.trueImage == null) {
-					data.trueImage = new BufferedImage(width, height, BufferedImage.TYPE_INT_ARGB_PRE);
-				}
-				data.renderingImage.lock();
-				try {
-					data.currentImagePointer.set(true);
-					currentImage = data.trueImage;
-				} finally {
-					data.renderingImage.unlock();
-				}
+			ImageData imageData = data.imageSync.get(imageToBuild);
+			if (imageData == null) {
+				imageData = new ImageData(new BufferedImage(width, height, BufferedImage.TYPE_INT_ARGB_PRE), 0.0);
 			}
 		}
 		
 		public BufferedImage call() {
-			SlicingProfile slicingProfile = printJob.getPrinter().getConfiguration().getSlicingProfile();
-			int xResolution = slicingProfile.getxResolution();
-			int yResolution = slicingProfile.getyResolution();
-			
 			data.slicer.colorizePolygons();
-			Graphics2D g2 = (Graphics2D)currentImage.getGraphics();
-			data.slicer.paintSlice(g2);
-			if (slicingProfile.getProjectorGradientCalculator() != null && slicingProfile.getProjectorGradientCalculator().length() > 0) {
-				Paint maskPaint;
-				try {
-					maskPaint = (Paint)TemplateEngine.runScript(printJob, data.scriptEngine, slicingProfile.getProjectorGradientCalculator());
-					g2.setPaint(maskPaint);
-					g2.fillRect(0, 0, xResolution, yResolution);
-				} catch (ScriptException e) {
-					e.printStackTrace();
-				}
+			Lock lock = data.getSpecificLock(imageToBuild);
+			lock.lock();
+			try {
+				Graphics2D g2 = (Graphics2D)data.getCurrentImage().getGraphics();
+				data.slicer.paintSlice(g2);
+				ImageData imageData = data.imageSync.get(imageToBuild);
+				imageData.area = (double)data.slicer.getBuildArea();
+				data.aid.applyBulbMask(g2);
+				return data.getCurrentImage();
+			} finally {
+				lock.unlock();
 			}
-			return currentImage;
 		}
 	}
 
@@ -125,7 +108,7 @@ public class STLFileProcessor implements PrintFileProcessor<Set<Triangle3d>> {
 	public double getBuildAreaMM(PrintJob printJob) {
 		STLFileData data = dataByPrintJob.get(printJob);
 		SlicingProfile slicingProfile = printJob.getPrinter().getConfiguration().getSlicingProfile();
-		return data.slicer.getBuildArea() / (slicingProfile.getDotsPermmX() * slicingProfile.getDotsPermmY());
+		return data.getCurrentArea() / (slicingProfile.getDotsPermmX() * slicingProfile.getDotsPermmY());
 	}
 	
 	//TODO: Why does the image on the web show a scan line defect with the north side gray and the south side white?
@@ -136,127 +119,72 @@ public class STLFileProcessor implements PrintFileProcessor<Set<Triangle3d>> {
 			return null;
 		}
 		
-		if (data.currentImagePointer == null) {
-			return null;
-		}
-		
-		data.renderingImage.lock();
+		ReentrantLock lock = data.getCurrentLock();
+		lock.lock();
 		try {
-			BufferedImage currentImage = data.currentImagePointer.get() && data.falseImage != null?data.falseImage:data.trueImage;
+			BufferedImage currentImage = data.getCurrentImage();
+			if (currentImage == null)
+				return null;
+			
 			return currentImage.getSubimage(0, 0, currentImage.getWidth(), currentImage.getHeight());
 		} finally {
-			data.renderingImage.unlock();
+			lock.unlock();
 		}
 	}
 
 	@Override
 	public JobStatus processFile(PrintJob printJob) throws Exception {
-		Printer printer = printJob.getPrinter();
-		printJob.setStartTime(System.currentTimeMillis());
-		STLFileData data = new STLFileData();
-		PrinterConfiguration configuration = printer.getConfiguration();
-		SlicingProfile slicingProfile = configuration.getSlicingProfile();
-		dataByPrintJob.put(printJob, data);
-		double xPixelsPerMM = slicingProfile.getDotsPermmX();
-		double yPixelsPerMM = slicingProfile.getDotsPermmY();
-		int xResolution = slicingProfile.getxResolution();
-		int yResolution = slicingProfile.getyResolution();
-		InkConfig inkConfiguration = slicingProfile.getSelectedInkConfig();
-		data.slicer = new ZSlicer(
-				printJob.getJobFile(),
-				1, xPixelsPerMM, yPixelsPerMM, 
-				inkConfiguration.getSliceHeight(), true);
-		try {
-			data.slicer.loadFile(new Double(xResolution), new Double(yResolution));
-			printJob.setTotalSlices(data.slicer.getZMax() - data.slicer.getZMin());
-		} catch (FileNotFoundException e) {
-			e.printStackTrace();
-			return JobStatus.Failed;
-		}
+		PrintFileProcessingAid aid = new PrintFileProcessingAid();
+		DataAid dataAid = aid.performHeader(printJob);
+		
+		STLFileData stlData = new STLFileData(aid, dataAid.scriptEngine);
+		dataByPrintJob.put(printJob, stlData);
+		stlData.slicer = new ZSlicer(printJob.getJobFile(), 1, dataAid.xPixelsPerMM, dataAid.yPixelsPerMM, dataAid.sliceHeight, true);
+		stlData.slicer.loadFile(new Double(dataAid.xResolution), new Double(dataAid.yResolution));
+		printJob.setTotalSlices(stlData.slicer.getZMax() - stlData.slicer.getZMin());
 		
 		//Get the slicer queued up for the first image;
-		data.slicer.setZ(data.slicer.getZMin());
+		stlData.slicer.setZ(stlData.slicer.getZMin());
+		stlData.currentImagePointer = true;
+		Future<BufferedImage> currentImage = Main.GLOBAL_EXECUTOR.submit(new CurrentImageRenderer(stlData, stlData.currentImagePointer, dataAid.xResolution, dataAid.yResolution));
 		
-		data.currentImagePointer = new AtomicBoolean(true);
-		Future<BufferedImage> currentImage = EXECUTOR.submit(new CurrentImageRenderer(printJob, data, xResolution, yResolution));
-		try {
-			long currentSliceTime;
-			if (slicingProfile.getgCodeHeader() != null && slicingProfile.getgCodeHeader().trim().length() > 0) {
-				printer.getGCodeControl().executeGCodeWithTemplating(printJob, slicingProfile.getgCodeHeader());
+		int startPoint = dataAid.slicingProfile.getDirection() == BuildDirection.Bottom_Up?(stlData.slicer.getZMin() + 1): (stlData.slicer.getZMax() + 1);
+		int endPoint = dataAid.slicingProfile.getDirection() == BuildDirection.Bottom_Up?(stlData.slicer.getZMax() + 1): (stlData.slicer.getZMin() + 1);
+		for (int z = startPoint; z <= endPoint && dataAid.printer.isPrintInProgress(); z += dataAid.slicingProfile.getDirection().getVector()) {
+			
+			//Performs all of the duties that are common to most print files
+			JobStatus status = aid.performPreSlice(stlData.slicer.getStlErrors());
+			if (status != null) {
+				return status;
 			}
 			
-			int startPoint = slicingProfile.getDirection() == BuildDirection.Bottom_Up?(data.slicer.getZMin() + 1): (data.slicer.getZMax() + 1);
-			int endPoint = slicingProfile.getDirection() == BuildDirection.Bottom_Up?(data.slicer.getZMax() + 1): (data.slicer.getZMin() + 1);
-			for (int z = startPoint; z <= endPoint && printer.isPrintInProgress(); z += slicingProfile.getDirection().getVector()) {
-				currentSliceTime = System.currentTimeMillis();
-				//Get out if the print is cancelled
-				if (!printer.waitForPauseIfRequired()) {
-					return printer.getStatus();
-				}
-
-				if (!data.slicer.getStlErrors().isEmpty()) {
-					NotificationManager.errorEncountered(printJob, data.slicer.getStlErrors());
-				}
-				
-				if (slicingProfile.getgCodePreslice() != null && slicingProfile.getgCodePreslice().trim().length() > 0) {
-					printer.getGCodeControl().executeGCodeWithTemplating(printJob, slicingProfile.getgCodePreslice());
-				}
-				printer.showImage(currentImage.get());
-
-				//We don't need to waste CPU rendering the last image
-				if (z < data.slicer.getZMax() + 1) {
-					data.slicer.setZ(z);
-					currentImage = EXECUTOR.submit(new CurrentImageRenderer(printJob, data, xResolution, yResolution));
-				}
-
-				if (slicingProfile.getExposureTimeCalculator() != null && slicingProfile.getExposureTimeCalculator().trim().length() > 0) {
-					printJob.setExposureTime(((Number)TemplateEngine.runScript(printJob, data.scriptEngine, slicingProfile.getExposureTimeCalculator())).intValue());
-				}
-				Thread.sleep(printJob.getExposureTime());
-				printer.showBlankImage();
-				
-				
-				//Get out if the print is cancelled
-				if (!printer.waitForPauseIfRequired()) {
-					return printer.getStatus();
-				}
-				
-				if (slicingProfile.getzLiftDistanceCalculator() != null && slicingProfile.getzLiftDistanceCalculator().trim().length() > 0) {
-					printJob.setZLiftDistance(((Number)TemplateEngine.runScript(printJob, data.scriptEngine, slicingProfile.getzLiftDistanceCalculator())).doubleValue());
-				}
-				if (slicingProfile.getzLiftSpeedCalculator() != null && slicingProfile.getzLiftSpeedCalculator().trim().length() > 0) {
-					printJob.setZLiftSpeed(((Number)TemplateEngine.runScript(printJob, data.scriptEngine, slicingProfile.getzLiftSpeedCalculator())).doubleValue());
-				}
-				if (slicingProfile.getZLiftDistanceGCode() != null && slicingProfile.getZLiftDistanceGCode().trim().length() > 0) {
-					printer.getGCodeControl().executeGCodeWithTemplating(printJob, slicingProfile.getZLiftDistanceGCode());
-				}
-				if (slicingProfile.getZLiftSpeedGCode() != null && slicingProfile.getZLiftSpeedGCode().trim().length() > 0) {
-					printer.getGCodeControl().executeGCodeWithTemplating(printJob, slicingProfile.getZLiftSpeedGCode());
-				}
-				printer.getGCodeControl().executeGCodeWithTemplating(printJob, slicingProfile.getgCodeLift());
-				
-				printJob.addNewSlice(System.currentTimeMillis() - currentSliceTime, getBuildAreaMM(printJob));
-				
-				//Notify the client that the printJob has increased the currentSlice
-				NotificationManager.jobChanged(printer, printJob);
+			//Wait until the image has been properly rendered. Most likely, it's already done though...
+			BufferedImage image = currentImage.get();
+			
+			//This swaps the image pointer to the next image that was being rendered while we were showing this image.
+			stlData.currentImagePointer = !stlData.currentImagePointer;
+			
+			//Cure the current image
+			dataAid.printer.showImage(image);
+			
+			//Render the next image while we are waiting for the current image to cure
+			if (z < stlData.slicer.getZMax() + 1) {
+				stlData.slicer.setZ(z);
+				currentImage = Main.GLOBAL_EXECUTOR.submit(new CurrentImageRenderer(stlData, !stlData.currentImagePointer, dataAid.xResolution, dataAid.yResolution));
 			}
 			
-			if (!printer.isPrintInProgress()) {
-				return printer.getStatus();
+			//Performs all of the duties that are common to most print files
+			status = aid.performPostSlice(this);
+			if (status != null) {
+				return status;
 			}
-			
-			if (slicingProfile.getgCodeFooter() != null && slicingProfile.getgCodeFooter().trim().length() == 0) {
-				printer.getGCodeControl().executeGCodeWithTemplating(printJob, slicingProfile.getgCodeFooter());
-			}
-			return JobStatus.Completed;
-		} catch (InterruptedException | ExecutionException | InappropriateDeviceException | ScriptException e) {
-			e.printStackTrace();
-			throw e;
 		}
+		
+		return aid.performFooter();
 	}
 
 	@Override
-	public void prepareEnvironment(File processingFile) throws JobManagerException {
+	public void prepareEnvironment(File processingFile, PrintJob printJob) throws JobManagerException {
 	}
 
 	@Override
@@ -271,5 +199,10 @@ public class STLFileProcessor implements PrintFileProcessor<Set<Triangle3d>> {
 		}
 		
 		return data.slicer.getAllTriangles();
+	}
+
+	@Override
+	public String getFriendlyName() {
+		return "STL 3D Model";
 	}
 }
